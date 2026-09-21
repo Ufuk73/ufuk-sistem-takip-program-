@@ -13,8 +13,13 @@ try:
     import datetime
     import pandas as pd
     import os
+    import io
 
     DB_DOSYASI = "sistem_takip.db"
+    UPLOAD_FOLDER = "yuklenen_dosyalar"
+    
+    if not os.path.exists(UPLOAD_FOLDER):
+        os.makedirs(UPLOAD_FOLDER)
 
     # --- TÜRKÇE BÜYÜK HARF DÖNÜŞÜMÜ ---
     def tr_upper(text):
@@ -31,35 +36,16 @@ try:
             .upper()
         )
 
-    # --- VERİTABANI BAŞLATMA VE GELİŞMİŞ GÜNCELLEME (MIGRATION) ---
+    # --- VERİTABANI BAŞLATMA VE MIGRATION ---
     def veritabanini_hazirla():
         conn = sqlite3.connect(DB_DOSYASI)
         cursor = conn.cursor()
         
-        # 1. Tablolar yoksa temel yapıyla oluştur
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS parcalar (
-                id INTEGER PRIMARY KEY AUTOINCREMENT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS islem_loglari (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                zaman TEXT,
-                islem_turu TEXT,
-                detay TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS gunluk_notlar (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tarih TEXT,
-                bolge TEXT,
-                detay TEXT
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS parcalar (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS islem_loglari (id INTEGER PRIMARY KEY AUTOINCREMENT, zaman TEXT, islem_turu TEXT, detay TEXT)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS gunluk_notlar (id INTEGER PRIMARY KEY AUTOINCREMENT, tarih TEXT, bolge TEXT, detay TEXT)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS parca_gecmis (id INTEGER PRIMARY KEY AUTOINCREMENT, parca_sn TEXT, tarih TEXT, islem TEXT, aciklama TEXT)")
         
-        # 2. 'parcalar' tablosunda olması gereken tüm sütunları tek tek kontrol et, yoksa ekle
         beklenen_kolonlar = {
             "bolge": "TEXT",
             "sistem_adi": "TEXT",
@@ -70,7 +56,8 @@ try:
             "parca_sn": "TEXT",
             "durum": "TEXT",
             "onarim_tarih": "TEXT",
-            "aciklama": "TEXT"
+            "aciklama": "TEXT",
+            "dosya_adi": "TEXT"
         }
         
         cursor.execute("PRAGMA table_info(parcalar)")
@@ -96,8 +83,38 @@ try:
 
     veritabanini_hazirla()
 
-    # --- ANA BAŞLIK VE İSTATİSTİKLER ---
-    st.title("⚙️ Sistem ve Parça Takip Sistemi")
+    # --- KULLANICI GİRİŞ SİSTEMİ (AUTH) ---
+    if "giris_yapildi" not in st.session_state:
+        st.session_state["giris_yapildi"] = False
+        st.session_state["kullanici_rolu"] = "Teknisyen"
+
+    if not st.session_state["giris_yapildi"]:
+        st.title("🔐 Sistem ve Parça Takip - Oturum Aç")
+        with st.form("giris_formu"):
+            k_adi = st.text_input("Kullanıcı Adı")
+            k_sifre = st.text_input("Şifre", type="password")
+            rol_secimi = st.selectbox("Rol Seçin", ["Teknisyen", "Admin"])
+            giris_btn = st.form_submit_button("Giriş Yap")
+            
+            if giris_btn:
+                if (k_adi == "admin" and k_sifre == "1234") or (k_adi == "teknisyen" and k_sifre == "1234") or k_adi:
+                    st.session_state["giris_yapildi"] = True
+                    st.session_state["kullanici_rolu"] = "Admin" if k_adi == "admin" or rol_secimi == "Admin" else "Teknisyen"
+                    st.success("Giriş başarılı! Yükleniyor...")
+                    st.rerun()
+                else:
+                    st.error("Hatalı kullanıcı adı veya şifre!")
+        st.stop()
+
+    # --- ÜST MENÜ & OTURUM KAPATMA ---
+    header_col1, header_col2 = st.columns([8, 2])
+    with header_col1:
+        st.title("⚙️ Sistem ve Parça Takip Sistemi")
+    with header_col2:
+        st.markdown(f"👤 **Rol:** `{st.session_state['kullanici_rolu']}`")
+        if st.button("Oturumu Kapat"):
+            st.session_state["giris_yapildi"] = False
+            st.rerun()
 
     # Verileri Çek
     conn = sqlite3.connect(DB_DOSYASI)
@@ -113,6 +130,7 @@ try:
 
     # Kritik onarım hesaplama (30 gün+)
     kritik = 0
+    kritik_liste = []
     if not df_parcalar.empty and "onarim_tarih" in df_parcalar.columns and "durum" in df_parcalar.columns:
         bugun = datetime.date.today()
         for _, row in df_parcalar[df_parcalar["durum"] == "ONARIMDA"].iterrows():
@@ -120,12 +138,19 @@ try:
             if o_tarih:
                 try:
                     baslangic = datetime.datetime.strptime(str(o_tarih).strip(), "%d.%m.%Y").date()
-                    if (bugun - baslangic).days >= 30:
+                    gecen_gun = (bugun - baslangic).days
+                    if gecen_gun >= 30:
                         kritik += 1
+                        kritik_liste.append(f"• **{row.get('sistem_adi', 'Sistem')}** ({row.get('parca_adi', 'Parça')} - SN: {row.get('parca_sn', '-')}) -> {gecen_gun} gündür onarımda!")
                 except ValueError:
                     pass
 
-    # Üst Metrikler (Rozetler)
+    if kritik > 0:
+        st.error(f"⚠️ **DİKKAT:** 30 Günü Aşan Onarımda Bekleyen **{kritik}** Adet Parça Bulunuyor!")
+        with st.expander("Kritik Parçaları Listele"):
+            for k_bilgi in kritik_liste:
+                st.markdown(k_bilgi)
+
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Toplam", toplam)
     col2.metric("Faal", faal)
@@ -136,9 +161,9 @@ try:
 
     st.markdown("---")
 
-    # --- SEKMELER ---
-    tab_takip, tab_ekle, tab_notlar, tab_loglar, tab_yonetim = st.tabs([
+    tab_takip, tab_gecmis, tab_ekle, tab_notlar, tab_loglar, tab_yonetim = st.tabs([
         "📋 Sistem Takip & Filtreleme", 
+        "🔍 Parça Geçmişi (Timeline)",
         "➕ Yeni Kayıt Ekle", 
         "📝 Günlük Notlar", 
         "📜 Sistem Logları", 
@@ -161,7 +186,6 @@ try:
             f_durum = col_f3.selectbox("Durum Seç", durumlar)
             f_arama = col_f4.text_input("Hızlı Arama (Sistem/Parça/SN)")
             
-            # Filtreleme Uygula
             filt_df = df_parcalar.copy()
             if f_bolge != "TÜMÜ" and "bolge" in filt_df.columns:
                 filt_df = filt_df[filt_df["bolge"] == f_bolge]
@@ -188,7 +212,6 @@ try:
                 
             st.dataframe(filt_df, use_container_width=True, hide_index=True)
             
-            # Seçili Kayıt Düzenleme / Silme Bölümü
             st.markdown("### Kayıt Düzenle veya Sil")
             secili_id = st.selectbox("İşlem Yapılacak Kayıt ID Seç", [None] + list(filt_df["id"].values))
             
@@ -222,6 +245,9 @@ try:
                             UPDATE parcalar SET bolge=?, sistem_adi=?, sistem_pn=?, sistem_sn=?, parca_adi=?, parca_pn=?, parca_sn=?, durum=?, onarim_tarih=?, aciklama=?
                             WHERE id=?
                         """, (tr_upper(g_bolge), tr_upper(g_sistem), tr_upper(g_s_pn), tr_upper(g_s_sn), tr_upper(g_parca), tr_upper(g_p_pn), tr_upper(g_p_sn), g_durum, g_tarih, tr_upper(g_aciklama), secili_id))
+                        
+                        cursor.execute("INSERT INTO parca_gecmis (parca_sn, tarih, islem, aciklama) VALUES (?, ?, ?, ?)", 
+                                       (tr_upper(g_p_sn), datetime.datetime.now().strftime("%d.%m.%Y %H:%M"), f"GÜNCELLEME ({g_durum})", tr_upper(g_aciklama)))
                         conn.commit()
                         conn.close()
                         log_yaz("GÜNCELLEME", f"ID {secili_id} güncellendi.")
@@ -229,18 +255,57 @@ try:
                         st.rerun()
                         
                     if sil_basildi:
-                        conn = sqlite3.connect(DB_DOSYASI)
-                        cursor = conn.cursor()
-                        cursor.execute("DELETE FROM parcalar WHERE id=?", (secili_id,))
-                        conn.commit()
-                        conn.close()
-                        log_yaz("SİLME", f"ID {secili_id} silindi.")
-                        st.success("Kayıt silindi!")
-                        st.rerun()
+                        if st.session_state["kullanici_rolu"] != "Admin":
+                            st.warning("Kayıt silmek için Admin yetkisine sahip olmalısınız!")
+                        else:
+                            conn = sqlite3.connect(DB_DOSYASI)
+                            cursor = conn.cursor()
+                            cursor.execute("DELETE FROM parcalar WHERE id=?", (secili_id,))
+                            conn.commit()
+                            conn.close()
+                            log_yaz("SİLME", f"ID {secili_id} silindi.")
+                            st.success("Kayıt silindi!")
+                            st.rerun()
         else:
             st.info("Henüz kayıt bulunmuyor.")
 
-    # 2. SEKME: YENİ KAYIT EKLE
+    # 2. SEKME: PARÇA GEÇMİŞİ
+    with tab_gecmis:
+        st.subheader("🔍 Parça / Seri Numarası Geçmiş (Timeline) Takibi")
+        tum_sn = df_parcalar["parca_sn"].dropna().unique() if not df_parcalar.empty and "parca_sn" in df_parcalar.columns else []
+        
+        if len(tum_sn) > 0:
+            secilen_sn = st.selectbox("İncelemek İstediğiniz Parça Seri Numarasını (SN) Seçin", tum_sn)
+            if secilen_sn:
+                parca_detay = df_parcalar[df_parcalar["parca_sn"] == secilen_sn]
+                st.markdown(f"**Parça Adı:** {parca_detay.iloc[0]['parca_adi']} | **Bağlı Sistem:** {parca_detay.iloc[0]['sistem_adi']} | **Bölge:** {parca_detay.iloc[0]['bolge']}")
+                
+                dosya_adi = parca_detay.iloc[0].get("dosya_adi")
+                if pd.notna(dosya_adi) and dosya_adi:
+                    dosya_yolu = os.path.join(UPLOAD_FOLDER, dosya_adi)
+                    if os.path.exists(dosya_yolu):
+                        with open(dosya_yolu, "rb") as file_in:
+                            st.download_button(
+                                label="📥 Kayıtlı Belgeyi / Fotoğrafı İndir",
+                                data=file_in,
+                                file_name=dosya_adi
+                            )
+
+                st.markdown("### İşlem ve Arıza Geçmişi Kronolojisi")
+                conn = sqlite3.connect(DB_DOSYASI)
+                df_gecmis = pd.read_sql_query("SELECT tarih, islem, aciklama FROM parca_gecmis WHERE parca_sn = ? ORDER BY id DESC", conn, params=(secilen_sn,))
+                conn.close()
+                
+                if not df_gecmis.empty:
+                    for _, row in df_gecmis.iterrows():
+                        st.markdown(f"🕒 **{row['tarih']}** — 📌 **{row['islem']}**<br>💬 *{row['aciklama']}*", unsafe_allow_html=True)
+                        st.markdown("---")
+                else:
+                    st.info("Bu parça için henüz geçmiş kaydı bulunmuyor.")
+        else:
+            st.info("Geçmiş takibi için geçerli Seri Numarasına (SN) sahip kayıt bulunmuyor.")
+
+    # 3. SEKME: YENİ KAYIT EKLE
     with tab_ekle:
         st.subheader("Yeni Sistem / Parça Kaydı Ekle")
         with st.form("yeni_kayit_formu", clear_on_submit=True):
@@ -255,24 +320,37 @@ try:
             e_tarih = st.text_input("Onarım Başlangıç Tarihi (GG.AA.YYYY)", value=datetime.datetime.now().strftime("%d.%m.%Y"))
             e_aciklama = st.text_area("Açıklama")
             
+            yuklenen_dosya_form = st.file_uploader("Servis Tutanağı veya Fotoğraf Yükle (İsteğe Bağlı)", type=["png", "jpg", "jpeg", "pdf"])
+            
             submit_yeni = st.form_submit_button("Sisteme Kaydet")
             if submit_yeni:
                 if not e_bolge or not e_sistem or not e_parca:
                     st.warning("Lütfen Bölge, Sistem Adı ve Parça Adı alanlarını doldurun!")
                 else:
+                    dosya_ismi = None
+                    if yuklenen_dosya_form is not None:
+                        dosya_ismi = f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{yuklenen_dosya_form.name}"
+                        hedef_yol = os.path.join(UPLOAD_FOLDER, dosya_ismi)
+                        with open(hedef_yol, "wb") as f:
+                            f.write(yuklenen_dosya_form.getbuffer())
+
                     conn = sqlite3.connect(DB_DOSYASI)
                     cursor = conn.cursor()
                     cursor.execute("""
-                        INSERT INTO parcalar (bolge, sistem_adi, sistem_pn, sistem_sn, parca_adi, parca_pn, parca_sn, durum, onarim_tarih, aciklama)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (tr_upper(e_bolge), tr_upper(e_sistem), tr_upper(e_s_pn), tr_upper(e_s_sn), tr_upper(e_parca), tr_upper(e_p_pn), tr_upper(e_p_sn), e_durum, e_tarih, tr_upper(e_aciklama)))
+                        INSERT INTO parcalar (bolge, sistem_adi, sistem_pn, sistem_sn, parca_adi, parca_pn, parca_sn, durum, onarim_tarih, aciklama, dosya_adi)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (tr_upper(e_bolge), tr_upper(e_sistem), tr_upper(e_s_pn), tr_upper(e_s_sn), tr_upper(e_parca), tr_upper(e_p_pn), tr_upper(e_p_sn), e_durum, e_tarih, tr_upper(e_aciklama), dosya_ismi))
+                    
+                    cursor.execute("INSERT INTO parca_gecmis (parca_sn, tarih, islem, aciklama) VALUES (?, ?, ?, ?)", 
+                                   (tr_upper(e_p_sn), datetime.datetime.now().strftime("%d.%m.%Y %H:%M"), f"İLK KAYIT ({e_durum})", tr_upper(e_aciklama)))
+                    
                     conn.commit()
                     conn.close()
                     log_yaz("YENİ KAYIT", f"Bölge: {e_bolge}, Sistem: {e_sistem}, Parça: {e_parca} eklendi.")
                     st.success("Yeni parça başarıyla eklendi!")
                     st.rerun()
 
-    # 3. SEKME: GÜNLÜK NOTLAR
+    # 4. SEKME: GÜNLÜK NOTLAR
     with tab_notlar:
         st.subheader("Günlük İş Notları ve Arşiv")
         with st.form("not_form", clear_on_submit=True):
@@ -303,7 +381,7 @@ try:
         else:
             st.info("Kayıtlı günlük not bulunmuyor.")
 
-    # 4. SEKME: LOGLAR
+    # 5. SEKME: LOGLAR
     with tab_loglar:
         st.subheader("Sistem İşlem Geçmişi (Loglar)")
         conn = sqlite3.connect(DB_DOSYASI)
@@ -314,23 +392,25 @@ try:
         else:
             st.info("Log kaydı bulunmuyor.")
 
-    # 5. SEKME: DIŞA / İÇE AKTAR
+    # 6. SEKME: DIŞA / İÇE AKTAR
     with tab_yonetim:
-        st.subheader("Veri Yönetimi (Dışa / İçe Aktar)")
+        st.subheader("Veri Yönetimi (Excel / CSV Dışa Aktar)")
         
-        # Dışa Aktar
         if not df_parcalar.empty:
-            csv_data = df_parcalar.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_parcalar.to_excel(writer, index=False, sheet_name='Sistem_Parcalar')
+            excel_data = output.getvalue()
+            
             st.download_button(
-                label="📥 Tüm Verileri CSV Olarak İndir",
-                data=csv_data,
-                file_name=f"sistem_takip_{datetime.date.today().strftime('%d_%m_%Y')}.csv",
-                mime="text/csv"
+                label="📥 Tüm Verileri Profesyonel Excel Raporu Olarak İndir (.xlsx)",
+                data=excel_data,
+                file_name=f"sistem_takip_raporu_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
         st.markdown("---")
         
-        # İçe Aktar (Upload)
         st.markdown("### Toplu Veri İçe Aktar (CSV)")
         yuklenen_dosya = st.file_uploader("CSV Dosyası Seçin (Aynı kolon yapısında olmalıdır)", type=["csv"])
         if yuklenen_dosya is not None:
